@@ -114,6 +114,64 @@ class DysonDevice:
 
         raise DysonConnectTimeout
 
+    def connect_iot(self, endpoint: str, client_id: str, token_value: str, token_signature: str) -> None:
+        """Connect to the device via IoT/cloud MQTT broker with custom authentication."""
+        self._disconnected.clear()
+        self._mqtt_client = mqtt.Client(protocol=mqtt.MQTTv31)
+        
+        # Set up TLS for secure connection
+        self._mqtt_client.tls_set()
+        
+        # Set up custom authentication for IoT
+        self._mqtt_client.username_pw_set(client_id, token_value)
+        
+        # Add custom headers if supported by the MQTT client
+        # Note: This might need to be handled differently depending on the IoT implementation
+        if hasattr(self._mqtt_client, 'user_data_set'):
+            self._mqtt_client.user_data_set({"x-amzn-iot-token": token_signature})
+        
+        error = None
+
+        def _on_connect(client: mqtt.Client, userdata: Any, flags, rc):
+            _LOGGER.debug("IoT Connected with result code %d", rc)
+            nonlocal error
+            if rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
+                error = DysonInvalidCredential
+            elif rc != mqtt.CONNACK_ACCEPTED:
+                error = DysonConnectionRefused
+            else:
+                client.subscribe(self._status_topic)
+            self._connected.set()
+
+        def _on_disconnect(client, userdata, rc):
+            _LOGGER.debug(f"IoT Disconnected with result code {str(rc)}")
+
+        self._disconnected.set()
+
+        self._mqtt_client.on_connect = _on_connect
+        self._mqtt_client.on_disconnect = _on_disconnect
+        self._mqtt_client.on_message = self._on_message
+        
+        # Connect to IoT endpoint on port 8883 (MQTT over TLS)
+        self._mqtt_client.connect_async(endpoint, 8883)
+        self._mqtt_client.loop_start()
+        
+        if self._connected.wait(timeout=TIMEOUT):
+            if error is not None:
+                self.disconnect()
+                raise error
+
+            _LOGGER.info("Connected to device %s via IoT", self._serial)
+            if self._request_first_data():
+                self._mqtt_client.on_connect = self._on_connect
+                self._mqtt_client.on_disconnect = self._on_disconnect
+                return
+
+        # Close connection if timeout or connected but failed to get data
+        self.disconnect()
+
+        raise DysonConnectTimeout
+
     def disconnect(self) -> None:
         """Disconnect from the device."""
         self._connected.clear()

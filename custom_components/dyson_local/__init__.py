@@ -155,13 +155,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if iot_info:
             _LOGGER.debug("IoT details found for 360 model %s. Attempting IoT connection.", device.serial)
             try:
-                device.connect(
-                    host=iot_info["endpoint"],
-                    port=8883,
-                    username=iot_info["client_id"],
-                    password=iot_info["token_value"],
-                    headers={"x-amzn-iot-token": iot_info["token_signature"]},
-                    tls=True,
+                # Use the new IoT connection method
+                device.connect_iot(
+                    endpoint=iot_info["endpoint"],
+                    client_id=iot_info["client_id"],
+                    token_value=iot_info["token_value"],
+                    token_signature=iot_info["token_signature"]
                 )
                 _LOGGER.info("Successfully connected to 360 model %s via IoT", device.serial)
                 
@@ -282,13 +281,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         device.serial,
                     )
                     try:
-                        device.connect(
-                            host=iot_info["endpoint"],
-                            port=8883,
-                            username=iot_info["client_id"],
-                            password=iot_info["token_value"],
-                            headers={"x-amzn-iot-token": iot_info["token_signature"]},
-                            tls=True,
+                        # Use the new IoT connection method
+                        device.connect_iot(
+                            endpoint=iot_info["endpoint"],
+                            client_id=iot_info["client_id"],
+                            token_value=iot_info["token_value"],
+                            token_signature=iot_info["token_signature"]
                         )
                         _LOGGER.info("Successfully connected to device %s via IoT", device.serial)
                         
