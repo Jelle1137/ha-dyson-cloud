@@ -144,21 +144,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Check if device is a 360 model (vacuum robot)
-    is_360_model = entry.data[CONF_DEVICE_TYPE] in [DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV]
+    device_type = entry.data[CONF_DEVICE_TYPE]
+    _LOGGER.info("Device type from config: %s (type: %s)", device_type, type(device_type))
+    _LOGGER.info("Checking against 360 models: %s", [DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV])
+    is_360_model = device_type in [DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV]
+    _LOGGER.info("Is 360 model: %s", is_360_model)
     
     if is_360_model:
-        _LOGGER.debug("Device is a 360 model: %s", type(device).__name__)
+        _LOGGER.info("=== SETTING UP 360 MODEL ===")
+        _LOGGER.info("Device is a 360 model: %s", type(device).__name__)
+        _LOGGER.info("Device serial: %s", device.serial)
+        _LOGGER.info("Entry data keys: %s", list(entry.data.keys()))
         coordinator = None
         
         # 360 models always use IoT connection, never local discovery
         iot_info = entry.data.get(CONF_IOT_DETAILS)
+        _LOGGER.info("IoT details present: %s", iot_info is not None)
         if iot_info:
-            _LOGGER.debug("IoT details found for 360 model %s. Attempting IoT connection.", device.serial)
-            _LOGGER.debug("IoT endpoint: %s", iot_info.get("endpoint"))
-            _LOGGER.debug("IoT client_id: %s", iot_info.get("client_id"))
+            _LOGGER.info("IoT details found for 360 model %s. Attempting IoT connection.", device.serial)
+            _LOGGER.info("IoT endpoint: %s", iot_info.get("endpoint"))
+            _LOGGER.info("IoT client_id: %s", iot_info.get("client_id"))
+            _LOGGER.info("IoT token_value length: %d", len(iot_info.get("token_value", "")))
+            _LOGGER.info("IoT token_signature length: %d", len(iot_info.get("token_signature", "")))
             try:
                 # Use the new IoT connection method in a thread executor to avoid blocking
                 loop = asyncio.get_event_loop()
+                _LOGGER.info("About to call connect_iot() in thread executor...")
                 await loop.run_in_executor(
                     None,
                     device.connect_iot,
@@ -176,11 +187,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Forward entry setups
                 await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
                 
-                _LOGGER.debug("Setup complete for 360 model %s.", device.serial)
+                _LOGGER.info("Setup complete for 360 model %s.", device.serial)
                 return True
                 
             except DysonException as err:
                 _LOGGER.error("Failed to connect to 360 model %s via IoT: %s", device.serial, err)
+                _LOGGER.error("Exception type: %s", type(err).__name__)
                 _LOGGER.warning("IoT connection failed for 360 model, but this is expected for some devices")
                 
                 # For now, continue with setup even if IoT connection fails
@@ -191,10 +203,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Forward entry setups
                 await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
                 
-                _LOGGER.debug("Setup complete for 360 model %s (without active connection).", device.serial)
+                _LOGGER.info("Setup complete for 360 model %s (without active connection).", device.serial)
+                return True
+            except Exception as err:
+                _LOGGER.error("Unexpected error during IoT connection for %s: %s", device.serial, err)
+                _LOGGER.error("Exception type: %s", type(err).__name__)
+                import traceback
+                _LOGGER.error("Full traceback: %s", traceback.format_exc())
+                
+                # For now, continue with setup even if IoT connection fails
+                # Store device and coordinator in hass data
+                hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
+                hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+                
+                # Forward entry setups
+                await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
+                
+                _LOGGER.info("Setup complete for 360 model %s (without active connection).", device.serial)
                 return True
         else:
             _LOGGER.error("No IoT details found for 360 model %s", device.serial)
+            _LOGGER.error("Available entry data: %s", entry.data)
             raise ConfigEntryNotReady("360 model requires IoT details")
     else:
         # Set up data update coordinator

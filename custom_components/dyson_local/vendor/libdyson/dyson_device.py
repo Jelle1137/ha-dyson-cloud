@@ -68,8 +68,22 @@ class DysonDevice:
 
     def _request_first_data(self) -> bool:
         """Request and wait for first data."""
+        _LOGGER.info("Requesting first data from device %s", self._serial)
+        _LOGGER.debug("Clearing status_data_available event")
+        self._status_data_available.clear()
+        
+        _LOGGER.debug("Sending request current status...")
         self.request_current_status()
-        return self._status_data_available.wait(timeout=TIMEOUT)
+        
+        _LOGGER.info("Waiting for first data (timeout: %d seconds)...", TIMEOUT)
+        result = self._status_data_available.wait(timeout=TIMEOUT)
+        
+        if result:
+            _LOGGER.info("Successfully received first data from device %s", self._serial)
+        else:
+            _LOGGER.error("Timeout waiting for first data from device %s", self._serial)
+            
+        return result
 
     def connect(self, host: str) -> None:
         """Connect to the device MQTT broker."""
@@ -117,85 +131,182 @@ class DysonDevice:
 
     def connect_iot(self, endpoint: str, client_id: str, token_value: str, token_signature: str) -> None:
         """Connect to the device via IoT/cloud MQTT broker with custom authentication."""
-        _LOGGER.debug("Starting IoT connection to %s with client_id: %s", endpoint, client_id)
+        _LOGGER.info("=== STARTING IOT CONNECTION DEBUG ===")
+        _LOGGER.info("Endpoint: %s", endpoint)
+        _LOGGER.info("Client ID: %s", client_id)
+        _LOGGER.info("Token Value (first 10 chars): %s...", token_value[:10] if token_value else "None")
+        _LOGGER.info("Token Signature (first 10 chars): %s...", token_signature[:10] if token_signature else "None")
+        _LOGGER.info("Device Serial: %s", self._serial)
+        _LOGGER.info("Status Topic: %s", self._status_topic)
+        _LOGGER.info("Command Topic: %s", self._command_topic)
         
         self._disconnected.clear()
-        self._mqtt_client = mqtt.Client(protocol=mqtt.MQTTv31)
         
-        # Set up TLS for secure connection - create SSL context manually to avoid blocking calls
-        context = ssl.create_default_context()
-        self._mqtt_client.tls_set_context(context)
+        # Try different MQTT protocol versions
+        protocols_to_try = [
+            (mqtt.MQTTv311, "MQTTv3.1.1"),
+            (mqtt.MQTTv31, "MQTTv3.1"),
+            (mqtt.MQTTv5, "MQTTv5") if hasattr(mqtt, 'MQTTv5') else None
+        ]
+        protocols_to_try = [p for p in protocols_to_try if p is not None]
         
-        # Set up custom authentication for IoT
-        self._mqtt_client.username_pw_set(client_id, token_value)
+        for protocol_version, protocol_name in protocols_to_try:
+            _LOGGER.info("Trying MQTT protocol: %s", protocol_name)
+            
+            try:
+                self._mqtt_client = mqtt.Client(client_id=client_id, protocol=protocol_version)
+                _LOGGER.debug("Created MQTT client with protocol %s", protocol_name)
+                break
+            except Exception as e:
+                _LOGGER.warning("Failed to create MQTT client with %s: %s", protocol_name, e)
+                continue
+        else:
+            _LOGGER.error("Failed to create MQTT client with any protocol")
+            raise DysonConnectionRefused("Could not create MQTT client")
         
-        # Add custom headers if supported by the MQTT client
-        # Note: This might need to be handled differently depending on the IoT implementation
-        if hasattr(self._mqtt_client, 'user_data_set'):
-            self._mqtt_client.user_data_set({"x-amzn-iot-token": token_signature})
+        # Set up TLS for secure connection
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False  # AWS IoT might have specific hostname requirements
+            self._mqtt_client.tls_set_context(context)
+            _LOGGER.debug("TLS context set successfully")
+        except Exception as e:
+            _LOGGER.error("Failed to set TLS context: %s", e)
+            raise DysonConnectionRefused(f"TLS setup failed: {e}")
         
+        # Set up authentication
+        try:
+            self._mqtt_client.username_pw_set(client_id, token_value)
+            _LOGGER.debug("Username/password set: username=%s", client_id)
+        except Exception as e:
+            _LOGGER.error("Failed to set username/password: %s", e)
+            raise DysonConnectionRefused(f"Auth setup failed: {e}")
+        
+        # Track connection state
         error = None
         connection_result = None
-
+        connection_attempted = False
+        
         def _on_connect(client: mqtt.Client, userdata: Any, flags, rc):
-            _LOGGER.debug("IoT Connected with result code %d", rc)
             nonlocal error, connection_result
             connection_result = rc
+            _LOGGER.info("IoT MQTT Connection callback triggered with result code: %d", rc)
+            _LOGGER.info("Connection flags: %s", flags)
+            
+            # Log detailed connection result
+            result_meanings = {
+                0: "Connection Accepted",
+                1: "Incorrect protocol version",
+                2: "Invalid client identifier",
+                3: "Server unavailable",
+                4: "Bad username or password",
+                5: "Not authorized"
+            }
+            result_meaning = result_meanings.get(rc, f"Unknown result code: {rc}")
+            _LOGGER.info("Connection result meaning: %s", result_meaning)
+            
             if rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
                 _LOGGER.error("IoT connection refused: Bad username/password")
+                _LOGGER.error("Username used: %s", client_id)
+                _LOGGER.error("Password length: %d", len(token_value) if token_value else 0)
                 error = DysonInvalidCredential
             elif rc == mqtt.CONNACK_REFUSED_IDENTIFIER_REJECTED:
                 _LOGGER.error("IoT connection refused: Client identifier rejected")
+                _LOGGER.error("Client ID used: %s", client_id)
                 error = DysonConnectionRefused
             elif rc == mqtt.CONNACK_REFUSED_SERVER_UNAVAILABLE:
                 _LOGGER.error("IoT connection refused: Server unavailable")
                 error = DysonConnectionRefused
-            elif rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
-                _LOGGER.error("IoT connection refused: Bad username or password")
-                error = DysonInvalidCredential
             elif rc == mqtt.CONNACK_REFUSED_NOT_AUTHORIZED:
                 _LOGGER.error("IoT connection refused: Not authorized")
                 error = DysonInvalidCredential
             elif rc != mqtt.CONNACK_ACCEPTED:
-                _LOGGER.error("IoT connection refused with code: %d", rc)
+                _LOGGER.error("IoT connection refused with code: %d (%s)", rc, result_meaning)
                 error = DysonConnectionRefused
             else:
-                _LOGGER.debug("IoT connection successful, subscribing to topic: %s", self._status_topic)
-                client.subscribe(self._status_topic)
+                _LOGGER.info("IoT connection successful! Subscribing to topic: %s", self._status_topic)
+                _LOGGER.info("Command topic will be: %s", self._command_topic)
+                _LOGGER.info("Device type: %s", getattr(self, 'device_type', 'Unknown'))
+                try:
+                    result = client.subscribe(self._status_topic)
+                    _LOGGER.info("Subscribe result: %s", result)
+                except Exception as e:
+                    _LOGGER.error("Failed to subscribe to topic %s: %s", self._status_topic, e)
+            
             self._connected.set()
 
         def _on_disconnect(client, userdata, rc):
-            _LOGGER.debug(f"IoT Disconnected with result code {str(rc)}")
+            _LOGGER.warning("IoT MQTT Disconnected with result code: %s", rc)
+            self._connected.clear()
+            self._disconnected.set()
+            
+        def _on_log(client, userdata, level, buf):
+            _LOGGER.debug("MQTT Log (level %s): %s", level, buf)
+            
+        def _on_publish(client, userdata, mid):
+            _LOGGER.debug("MQTT message published with message ID: %s", mid)
+            
+        def _on_subscribe(client, userdata, mid, granted_qos):
+            _LOGGER.info("MQTT subscription confirmed - Message ID: %s, QoS: %s", mid, granted_qos)
 
-        self._disconnected.set()
-
+        # Set up all MQTT callbacks
         self._mqtt_client.on_connect = _on_connect
         self._mqtt_client.on_disconnect = _on_disconnect
         self._mqtt_client.on_message = self._on_message
+        self._mqtt_client.on_log = _on_log
+        self._mqtt_client.on_publish = _on_publish
+        self._mqtt_client.on_subscribe = _on_subscribe
         
-        # Connect to IoT endpoint on port 8883 (MQTT over TLS)
-        _LOGGER.debug("Attempting IoT connection to %s:8883", endpoint)
-        self._mqtt_client.connect_async(endpoint, 8883)
-        self._mqtt_client.loop_start()
+        self._disconnected.set()
         
-        if self._connected.wait(timeout=TIMEOUT):
+        # Connect to IoT endpoint
+        _LOGGER.info("Attempting to connect to %s:8883", endpoint)
+        try:
+            self._mqtt_client.connect_async(endpoint, 8883, 60)  # Increased keepalive
+            _LOGGER.debug("connect_async() called successfully")
+        except Exception as e:
+            _LOGGER.error("Failed to call connect_async(): %s", e)
+            raise DysonConnectionRefused(f"Connection attempt failed: {e}")
+        
+        try:
+            self._mqtt_client.loop_start()
+            _LOGGER.debug("MQTT loop started")
+        except Exception as e:
+            _LOGGER.error("Failed to start MQTT loop: %s", e)
+            raise DysonConnectionRefused(f"MQTT loop start failed: {e}")
+        
+        # Wait for connection with longer timeout
+        extended_timeout = 30  # Increased from 10 to 30 seconds
+        _LOGGER.info("Waiting for connection (timeout: %d seconds)...", extended_timeout)
+        
+        if self._connected.wait(timeout=extended_timeout):
             if error is not None:
                 _LOGGER.error("IoT connection failed with error: %s, result code: %s", error, connection_result)
                 self.disconnect()
                 raise error
 
-            _LOGGER.info("Connected to device %s via IoT", self._serial)
-            if self._request_first_data():
-                self._mqtt_client.on_connect = self._on_connect
-                self._mqtt_client.on_disconnect = self._on_disconnect
-                return
-            else:
-                _LOGGER.error("Failed to get first data from IoT device")
+            _LOGGER.info("Successfully connected to device %s via IoT!", self._serial)
+            
+            # Request initial data
+            _LOGGER.info("Requesting initial device data...")
+            try:
+                if self._request_first_data():
+                    _LOGGER.info("Successfully received initial data from device %s", self._serial)
+                    # Set normal callbacks
+                    self._mqtt_client.on_connect = self._on_connect
+                    self._mqtt_client.on_disconnect = self._on_disconnect
+                    return
+                else:
+                    _LOGGER.error("Failed to get initial data from IoT device %s within timeout", self._serial)
+            except Exception as e:
+                _LOGGER.error("Exception while requesting initial data: %s", e)
+
+        else:
+            _LOGGER.error("IoT connection timed out after %d seconds", extended_timeout)
 
         # Close connection if timeout or connected but failed to get data
-        _LOGGER.error("IoT connection timed out or failed to get data")
+        _LOGGER.error("Disconnecting due to connection failure")
         self.disconnect()
-
         raise DysonConnectTimeout
 
     def disconnect(self) -> None:
@@ -232,17 +343,29 @@ class DysonDevice:
             callback(MessageType.STATE)
 
     def _on_message(self, client, userdata: Any, msg: mqtt.MQTTMessage):
-        payload = json.loads(msg.payload.decode("utf-8"))
-        self._handle_message(payload)
+        _LOGGER.info("IoT MQTT message received on topic: %s", msg.topic)
+        try:
+            payload = json.loads(msg.payload.decode("utf-8"))
+            _LOGGER.debug("Message payload: %s", payload)
+            self._handle_message(payload)
+        except Exception as e:
+            _LOGGER.error("Error processing MQTT message: %s", e)
+            _LOGGER.error("Raw message payload: %s", msg.payload)
 
     def _handle_message(self, payload: dict) -> None:
+        _LOGGER.debug("Handling message with payload: %s", payload)
         if payload["msg"] in ["CURRENT-STATE", "STATE-CHANGE"]:
+            _LOGGER.info("Processing state message: %s", payload["msg"])
             _LOGGER.debug("New state: %s", payload)
             self._update_status(payload)
             if not self._status_data_available.is_set():
+                _LOGGER.debug("Setting status_data_available event")
                 self._status_data_available.set()
+            _LOGGER.debug("Calling %d callbacks", len(self._callbacks))
             for callback in self._callbacks:
                 callback(MessageType.STATE)
+        else:
+            _LOGGER.warning("Unhandled message type: %s", payload.get("msg", "Unknown"))
 
     @abstractmethod
     def _update_status(self, payload: dict) -> None:
@@ -263,12 +386,21 @@ class DysonDevice:
     def request_current_status(self) -> None:
         """Request current status."""
         if not self.is_connected:
+            _LOGGER.error("Cannot request current status - device not connected")
             raise DysonNotConnected
+            
+        _LOGGER.debug("Publishing REQUEST-CURRENT-STATE to topic: %s", self._command_topic)
         payload = {
             "msg": "REQUEST-CURRENT-STATE",
             "time": mqtt_time(),
         }
-        self._mqtt_client.publish(self._command_topic, json.dumps(payload))
+        _LOGGER.debug("Request payload: %s", payload)
+        
+        try:
+            result = self._mqtt_client.publish(self._command_topic, json.dumps(payload))
+            _LOGGER.debug("Publish result: %s", result)
+        except Exception as e:
+            _LOGGER.error("Failed to publish request current status: %s", e)
 
 
 class DysonFanDevice(DysonDevice):

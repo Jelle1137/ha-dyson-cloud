@@ -151,11 +151,6 @@ class DysonVacuumEntity(DysonEntity, StateVacuumEntity):
     """Dyson vacuum entity base class."""
 
     @property
-    def state(self) -> str:
-        """Return the state of the vacuum."""
-        return DYSON_STATES[self._device.state]
-
-    @property
     def activity(self) -> VacuumActivity:
         """Return the current activity of the vacuum."""
         return DYSON_STATES[self._device.state]
