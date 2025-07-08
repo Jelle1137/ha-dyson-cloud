@@ -40,6 +40,7 @@ from .const import (
     CONF_CREDENTIAL,
     CONF_DEVICE_TYPE,
     CONF_SERIAL,
+    CONF_IOT_DETAILS,
     DATA_COORDINATORS,
     DATA_DEVICES,
     DATA_DISCOVERY,
@@ -239,7 +240,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 discovery_err,
             )
 
-            iot_info = getattr(device, "iot_details", None)
+            iot_info = entry.data.get(CONF_IOT_DETAILS)
             if iot_info:
                 _LOGGER.debug(
                     "IoT details found for device %s. Attempting remote MQTT connection.",
@@ -247,14 +248,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 try:
                     device.connect(
-                        host=iot_info["Endpoint"],
+                        host=iot_info["endpoint"],
                         port=8883,
-                        username=iot_info["IoTCredentials"]["ClientId"],
-                        password=iot_info["IoTCredentials"]["TokenValue"],
-                        headers={"x-amzn-iot-token": iot_info["IoTCredentials"]["TokenSignature"]},
+                        username=iot_info["client_id"],
+                        password=iot_info["token_value"],
+                        headers={"x-amzn-iot-token": iot_info["token_signature"]},
                         tls=True,
                     )
                     _LOGGER.info("Successfully connected to device %s via IoT", device.serial)
+                    
+                    # Store device and coordinator in hass data
+                    _LOGGER.debug("Storing device and coordinator in hass data.")
+                    hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
+                    hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+
+                    # Forward entry setups
+                    _LOGGER.debug("Forwarding entry setups for platforms.")
+                    await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
+                    
                 except DysonException as remote_err:
                     _LOGGER.error(
                         "IoT connection failed for device %s (%s). Error: %s",
@@ -263,6 +274,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         remote_err,
                     )
                     raise ConfigEntryNotReady("All connection methods failed")
+            else:
+                _LOGGER.error(
+                    "No IoT details available for device %s. Cannot connect remotely.",
+                    device.serial,
+                )
+                raise ConfigEntryNotReady("No connection method available")
 
     _LOGGER.debug("Setup entry complete for device %s.", device.serial)
     return True

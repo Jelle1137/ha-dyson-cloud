@@ -25,7 +25,7 @@ from homeassistant.components.zeroconf import async_get_instance
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_EMAIL, CONF_PASSWORD, CONF_USERNAME
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import CONF_CREDENTIAL, CONF_DEVICE_TYPE, CONF_SERIAL, DOMAIN
+from .const import CONF_CREDENTIAL, CONF_DEVICE_TYPE, CONF_SERIAL, CONF_IOT_DETAILS, DOMAIN
 
 from .cloud.const import CONF_REGION, CONF_AUTH
 
@@ -363,13 +363,19 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> Optional[str]:
         """Try connect and return config entry data."""
         await self._async_try_connect(serial, credential, device_type, host)
-        return {
+        data = {
             CONF_SERIAL: serial,
             CONF_CREDENTIAL: credential,
             CONF_DEVICE_TYPE: device_type,
             CONF_NAME: name,
             CONF_HOST: host,
         }
+        
+        # Include IoT details if available from device info
+        if hasattr(self, '_device_info') and self._device_info and self._device_info.iot_details:
+            data[CONF_IOT_DETAILS] = self._device_info.iot_details
+            
+        return data
 
     async def _async_try_connect(
         self,
