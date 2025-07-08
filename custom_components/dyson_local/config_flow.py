@@ -5,6 +5,7 @@ import threading
 from typing import Optional
 
 from .vendor.libdyson import DEVICE_TYPE_NAMES, get_device, get_mqtt_info_from_wifi_info
+from .vendor.libdyson.const import DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV
 from .vendor.libdyson.cloud import DysonDeviceInfo
 from .vendor.libdyson.discovery import DysonDiscovery
 from .vendor.libdyson.exceptions import (
@@ -387,6 +388,16 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Try connect."""
         # If we have IoT details from cloud discovery, we can be more lenient with local connection
         has_iot_details = hasattr(self, '_device_info') and self._device_info and self._device_info.iot_details
+        
+        # 360 models (vacuum robots) don't support local network discovery - they always use cloud connection
+        is_360_model = device_type in [DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV]
+        
+        if is_360_model:
+            _LOGGER.debug("Device is a 360 model, skipping local connection attempt - will use cloud connection")
+            if not has_iot_details:
+                _LOGGER.error("360 model device requires IoT details but none found")
+                raise CannotFind
+            return
         
         if has_iot_details:
             _LOGGER.debug("Device has IoT details, will use as fallback if local connection fails")

@@ -16,6 +16,7 @@ from .vendor.libdyson import (
     MessageType,
     get_device,
 )
+from .vendor.libdyson.const import DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV
 from .vendor.libdyson.cloud import (
     DysonAccountCN,
     DysonAccount,
@@ -142,10 +143,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data[CONF_DEVICE_TYPE],
     )
 
-    # Check if device is a 360 model
-    if isinstance(device, (Dyson360Eye, Dyson360Heurist, Dyson360VisNav)):
+    # Check if device is a 360 model (vacuum robot)
+    is_360_model = entry.data[CONF_DEVICE_TYPE] in [DEVICE_TYPE_360_EYE, DEVICE_TYPE_360_HEURIST, DEVICE_TYPE_360_VIS_NAV]
+    
+    if is_360_model:
         _LOGGER.debug("Device is a 360 model: %s", type(device).__name__)
         coordinator = None
+        
+        # 360 models always use IoT connection, never local discovery
+        iot_info = entry.data.get(CONF_IOT_DETAILS)
+        if iot_info:
+            _LOGGER.debug("IoT details found for 360 model %s. Attempting IoT connection.", device.serial)
+            try:
+                device.connect(
+                    host=iot_info["endpoint"],
+                    port=8883,
+                    username=iot_info["client_id"],
+                    password=iot_info["token_value"],
+                    headers={"x-amzn-iot-token": iot_info["token_signature"]},
+                    tls=True,
+                )
+                _LOGGER.info("Successfully connected to 360 model %s via IoT", device.serial)
+                
+                # Store device and coordinator in hass data
+                hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
+                hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+                
+                # Forward entry setups
+                await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
+                
+                _LOGGER.debug("Setup complete for 360 model %s.", device.serial)
+                return True
+                
+            except DysonException as err:
+                _LOGGER.error("Failed to connect to 360 model %s via IoT: %s", device.serial, err)
+                raise ConfigEntryNotReady("Failed to connect to 360 model via IoT")
+        else:
+            _LOGGER.error("No IoT details found for 360 model %s", device.serial)
+            raise ConfigEntryNotReady("360 model requires IoT details")
     else:
         # Set up data update coordinator
         _LOGGER.debug("Device is not a 360 model. Setting up data update coordinator.")
@@ -173,113 +208,113 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.debug("Data update coordinator created.")
 
-    def setup_entry(host: str, is_discovery: bool = True) -> bool:
-        """Connect to the device."""
-        _LOGGER.warning("Attempting to connect to device at host: %s", host)
-        try:
-            device.connect(host)
-            _LOGGER.info("Successfully connected to device %s at %s", device.serial, host)
-        except DysonException as conn_err:
-            if is_discovery:
+        def setup_entry(host: str, is_discovery: bool = True) -> bool:
+            """Connect to the device."""
+            _LOGGER.warning("Attempting to connect to device at host: %s", host)
+            try:
+                device.connect(host)
+                _LOGGER.info("Successfully connected to device %s at %s", device.serial, host)
+            except DysonException as conn_err:
+                if is_discovery:
+                    _LOGGER.error(
+                        "Failed to connect to device %s at %s. Error: %s",
+                        device.serial,
+                        host,
+                        conn_err,
+                    )
+                    return
                 _LOGGER.error(
-                    "Failed to connect to device %s at %s. Error: %s",
+                    "Critical connection error for device %s: %s. Raising ConfigEntryNotReady.",
                     device.serial,
-                    host,
                     conn_err,
                 )
-                return
-            _LOGGER.error(
-                "Critical connection error for device %s: %s. Raising ConfigEntryNotReady.",
-                device.serial,
-                conn_err,
-            )
-            raise ConfigEntryNotReady
+                raise ConfigEntryNotReady
 
-        # Store device and coordinator in hass data
-        _LOGGER.debug("Storing device and coordinator in hass data.")
-        hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
-        hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+            # Store device and coordinator in hass data
+            _LOGGER.debug("Storing device and coordinator in hass data.")
+            hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
+            hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
 
-        # Forward entry setups
-        _LOGGER.debug("Forwarding entry setups for platforms.")
-        asyncio.run_coroutine_threadsafe(
-            hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device)), hass.loop
-        ).result()
+            # Forward entry setups
+            _LOGGER.debug("Forwarding entry setups for platforms.")
+            asyncio.run_coroutine_threadsafe(
+                hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device)), hass.loop
+            ).result()
 
-    host = entry.data.get(CONF_HOST)
-    if host:
-        _LOGGER.debug("Host provided in entry data: %s. Attempting direct connection.", host)
-        await hass.async_add_executor_job(
-            partial(setup_entry, host, is_discovery=False)
-        )
-    else:
-        _LOGGER.debug("No host in entry data. Attempting discovery.")
-        discovery = hass.data[DOMAIN].get(DATA_DISCOVERY)
-        if discovery is None:
-            _LOGGER.debug("No existing discovery instance. Starting new discovery.")
-            discovery = DysonDiscovery()
-            hass.data[DOMAIN][DATA_DISCOVERY] = discovery
-            discovery.start_discovery(await async_get_instance(hass))
-
-            def stop_discovery(_):
-                _LOGGER.debug("Stopping Dyson discovery.")
-                discovery.stop_discovery()
-
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_discovery)
-
-        try:
-            _LOGGER.debug("Registering device for discovery.")
+        host = entry.data.get(CONF_HOST)
+        if host:
+            _LOGGER.debug("Host provided in entry data: %s. Attempting direct connection.", host)
             await hass.async_add_executor_job(
-                discovery.register_device, device, setup_entry
+                partial(setup_entry, host, is_discovery=False)
             )
-        except DysonException as discovery_err:
-            _LOGGER.warning(
-                "Discovery failed for device %s (%s). Error: %s",
-                device.serial,
-                device.device_type,
-                discovery_err,
-            )
+        else:
+            _LOGGER.debug("No host in entry data. Attempting discovery.")
+            discovery = hass.data[DOMAIN].get(DATA_DISCOVERY)
+            if discovery is None:
+                _LOGGER.debug("No existing discovery instance. Starting new discovery.")
+                discovery = DysonDiscovery()
+                hass.data[DOMAIN][DATA_DISCOVERY] = discovery
+                discovery.start_discovery(await async_get_instance(hass))
 
-            iot_info = entry.data.get(CONF_IOT_DETAILS)
-            if iot_info:
-                _LOGGER.debug(
-                    "IoT details found for device %s. Attempting remote MQTT connection.",
-                    device.serial,
+                def stop_discovery(_):
+                    _LOGGER.debug("Stopping Dyson discovery.")
+                    discovery.stop_discovery()
+
+                hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, stop_discovery)
+
+            try:
+                _LOGGER.debug("Registering device for discovery.")
+                await hass.async_add_executor_job(
+                    discovery.register_device, device, setup_entry
                 )
-                try:
-                    device.connect(
-                        host=iot_info["endpoint"],
-                        port=8883,
-                        username=iot_info["client_id"],
-                        password=iot_info["token_value"],
-                        headers={"x-amzn-iot-token": iot_info["token_signature"]},
-                        tls=True,
-                    )
-                    _LOGGER.info("Successfully connected to device %s via IoT", device.serial)
-                    
-                    # Store device and coordinator in hass data
-                    _LOGGER.debug("Storing device and coordinator in hass data.")
-                    hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
-                    hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+            except DysonException as discovery_err:
+                _LOGGER.warning(
+                    "Discovery failed for device %s (%s). Error: %s",
+                    device.serial,
+                    device.device_type,
+                    discovery_err,
+                )
 
-                    # Forward entry setups
-                    _LOGGER.debug("Forwarding entry setups for platforms.")
-                    await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
-                    
-                except DysonException as remote_err:
-                    _LOGGER.error(
-                        "IoT connection failed for device %s (%s). Error: %s",
+                iot_info = entry.data.get(CONF_IOT_DETAILS)
+                if iot_info:
+                    _LOGGER.debug(
+                        "IoT details found for device %s. Attempting remote MQTT connection.",
                         device.serial,
-                        device.device_type,
-                        remote_err,
                     )
-                    raise ConfigEntryNotReady("All connection methods failed")
-            else:
-                _LOGGER.error(
-                    "No IoT details available for device %s. Cannot connect remotely.",
-                    device.serial,
-                )
-                raise ConfigEntryNotReady("No connection method available")
+                    try:
+                        device.connect(
+                            host=iot_info["endpoint"],
+                            port=8883,
+                            username=iot_info["client_id"],
+                            password=iot_info["token_value"],
+                            headers={"x-amzn-iot-token": iot_info["token_signature"]},
+                            tls=True,
+                        )
+                        _LOGGER.info("Successfully connected to device %s via IoT", device.serial)
+                        
+                        # Store device and coordinator in hass data
+                        _LOGGER.debug("Storing device and coordinator in hass data.")
+                        hass.data[DOMAIN][DATA_DEVICES][entry.entry_id] = device
+                        hass.data[DOMAIN][DATA_COORDINATORS][entry.entry_id] = coordinator
+
+                        # Forward entry setups
+                        _LOGGER.debug("Forwarding entry setups for platforms.")
+                        await hass.config_entries.async_forward_entry_setups(entry, _async_get_platforms(device))
+                        
+                    except DysonException as remote_err:
+                        _LOGGER.error(
+                            "IoT connection failed for device %s (%s). Error: %s",
+                            device.serial,
+                            device.device_type,
+                            remote_err,
+                        )
+                        raise ConfigEntryNotReady("All connection methods failed")
+                else:
+                    _LOGGER.error(
+                        "No IoT details available for device %s. Cannot connect remotely.",
+                        device.serial,
+                    )
+                    raise ConfigEntryNotReady("No connection method available")
 
     _LOGGER.debug("Setup entry complete for device %s.", device.serial)
     return True
