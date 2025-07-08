@@ -231,7 +231,7 @@ class DysonAccount:
                 "Serial": serial
             }
 
-            url = f"{self._HOST}APT_PATH_IOT_CREDENTIALS"
+            url = f"{self._HOST}{APT_PATH_IOT_CREDENTIALS}"
             response = requests.post(url, headers=headers, json=payload, timeout=10)
             response.raise_for_status()
 
