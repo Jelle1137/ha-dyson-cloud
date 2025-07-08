@@ -13,15 +13,12 @@ from .vendor.libdyson import (
 
 from homeassistant.components.vacuum import (
     ATTR_STATUS,
-    STATE_CLEANING,
-    STATE_DOCKED,
-    STATE_ERROR,
-    STATE_RETURNING,
+    VacuumActivity,
     VacuumEntityFeature,
     StateVacuumEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, STATE_PAUSED
+from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 
 from . import DysonEntity
@@ -73,38 +70,38 @@ DYSON_STATUS = {
 }
 
 DYSON_STATES = {
-    VacuumState.FAULT_CALL_HELPLINE: STATE_ERROR,
-    VacuumState.FAULT_CONTACT_HELPLINE: STATE_ERROR,
-    VacuumState.FAULT_CRITICAL: STATE_ERROR,
-    VacuumState.FAULT_GETTING_INFO: STATE_ERROR,
-    VacuumState.FAULT_LOST: STATE_ERROR,
-    VacuumState.FAULT_ON_DOCK: STATE_ERROR,
-    VacuumState.FAULT_ON_DOCK_CHARGED: STATE_ERROR,
-    VacuumState.FAULT_ON_DOCK_CHARGING: STATE_ERROR,
-    VacuumState.FAULT_REPLACE_ON_DOCK: STATE_ERROR,
-    VacuumState.FAULT_RETURN_TO_DOCK: STATE_ERROR,
-    VacuumState.FAULT_RUNNING_DIAGNOSTIC: STATE_ERROR,
-    VacuumState.FAULT_USER_RECOVERABLE: STATE_ERROR,
-    VacuumState.FULL_CLEAN_ABANDONED: STATE_RETURNING,
-    VacuumState.FULL_CLEAN_ABORTED: STATE_RETURNING,
-    VacuumState.FULL_CLEAN_CHARGING: STATE_DOCKED,
-    VacuumState.FULL_CLEAN_DISCOVERING: STATE_CLEANING,
-    VacuumState.FULL_CLEAN_FINISHED: STATE_DOCKED,
-    VacuumState.FULL_CLEAN_INITIATED: STATE_CLEANING,
-    VacuumState.FULL_CLEAN_NEEDS_CHARGE: STATE_RETURNING,
-    VacuumState.FULL_CLEAN_PAUSED: STATE_PAUSED,
-    VacuumState.FULL_CLEAN_RUNNING: STATE_CLEANING,
-    VacuumState.FULL_CLEAN_TRAVERSING: STATE_CLEANING,
-    VacuumState.INACTIVE_CHARGED: STATE_DOCKED,
-    VacuumState.INACTIVE_CHARGING: STATE_DOCKED,
-    VacuumState.INACTIVE_DISCHARGING: STATE_DOCKED,
-    VacuumState.MAPPING_ABORTED: STATE_RETURNING,
-    VacuumState.MAPPING_CHARGING: STATE_PAUSED,
-    VacuumState.MAPPING_FINISHED: STATE_CLEANING,
-    VacuumState.MAPPING_INITIATED: STATE_CLEANING,
-    VacuumState.MAPPING_NEEDS_CHARGE: STATE_RETURNING,
-    VacuumState.MAPPING_PAUSED: STATE_PAUSED,
-    VacuumState.MAPPING_RUNNING: STATE_CLEANING,
+    VacuumState.FAULT_CALL_HELPLINE: VacuumActivity.ERROR,
+    VacuumState.FAULT_CONTACT_HELPLINE: VacuumActivity.ERROR,
+    VacuumState.FAULT_CRITICAL: VacuumActivity.ERROR,
+    VacuumState.FAULT_GETTING_INFO: VacuumActivity.ERROR,
+    VacuumState.FAULT_LOST: VacuumActivity.ERROR,
+    VacuumState.FAULT_ON_DOCK: VacuumActivity.ERROR,
+    VacuumState.FAULT_ON_DOCK_CHARGED: VacuumActivity.ERROR,
+    VacuumState.FAULT_ON_DOCK_CHARGING: VacuumActivity.ERROR,
+    VacuumState.FAULT_REPLACE_ON_DOCK: VacuumActivity.ERROR,
+    VacuumState.FAULT_RETURN_TO_DOCK: VacuumActivity.ERROR,
+    VacuumState.FAULT_RUNNING_DIAGNOSTIC: VacuumActivity.ERROR,
+    VacuumState.FAULT_USER_RECOVERABLE: VacuumActivity.ERROR,
+    VacuumState.FULL_CLEAN_ABANDONED: VacuumActivity.RETURNING,
+    VacuumState.FULL_CLEAN_ABORTED: VacuumActivity.RETURNING,
+    VacuumState.FULL_CLEAN_CHARGING: VacuumActivity.DOCKED,
+    VacuumState.FULL_CLEAN_DISCOVERING: VacuumActivity.CLEANING,
+    VacuumState.FULL_CLEAN_FINISHED: VacuumActivity.DOCKED,
+    VacuumState.FULL_CLEAN_INITIATED: VacuumActivity.CLEANING,
+    VacuumState.FULL_CLEAN_NEEDS_CHARGE: VacuumActivity.RETURNING,
+    VacuumState.FULL_CLEAN_PAUSED: VacuumActivity.PAUSED,
+    VacuumState.FULL_CLEAN_RUNNING: VacuumActivity.CLEANING,
+    VacuumState.FULL_CLEAN_TRAVERSING: VacuumActivity.CLEANING,
+    VacuumState.INACTIVE_CHARGED: VacuumActivity.DOCKED,
+    VacuumState.INACTIVE_CHARGING: VacuumActivity.DOCKED,
+    VacuumState.INACTIVE_DISCHARGING: VacuumActivity.DOCKED,
+    VacuumState.MAPPING_ABORTED: VacuumActivity.RETURNING,
+    VacuumState.MAPPING_CHARGING: VacuumActivity.PAUSED,
+    VacuumState.MAPPING_FINISHED: VacuumActivity.CLEANING,
+    VacuumState.MAPPING_INITIATED: VacuumActivity.CLEANING,
+    VacuumState.MAPPING_NEEDS_CHARGE: VacuumActivity.RETURNING,
+    VacuumState.MAPPING_PAUSED: VacuumActivity.PAUSED,
+    VacuumState.MAPPING_RUNNING: VacuumActivity.CLEANING,
 }
 
 EYE_POWER_MODE_ENUM_TO_STR = {
@@ -159,6 +156,11 @@ class DysonVacuumEntity(DysonEntity, StateVacuumEntity):
         return DYSON_STATES[self._device.state]
 
     @property
+    def activity(self) -> VacuumActivity:
+        """Return the current activity of the vacuum."""
+        return DYSON_STATES[self._device.state]
+
+    @property
     def status(self) -> str:
         """Return the status of the vacuum."""
         return DYSON_STATUS[self._device.state]
@@ -210,7 +212,7 @@ class Dyson360EyeEntity(DysonVacuumEntity):
 
     def start(self) -> None:
         """Start the device."""
-        if self.state == STATE_PAUSED:
+        if self.activity == VacuumActivity.PAUSED:
             self._device.resume()
         else:
             self._device.start()
@@ -235,7 +237,7 @@ class Dyson360HeuristEntity(DysonVacuumEntity):
 
     def start(self) -> None:
         """Start the device."""
-        if self.state == STATE_PAUSED:
+        if self.activity == VacuumActivity.PAUSED:
             self._device.resume()
         else:
             self._device.start_all_zones()
