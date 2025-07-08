@@ -17,26 +17,36 @@ class Dyson360Heurist(DysonVacuumDevice):
     @property
     def current_power_mode(self) -> VacuumHeuristPowerMode:
         """Return current power mode."""
+        if self._status is None:
+            return VacuumHeuristPowerMode.QUIET
         return VacuumHeuristPowerMode(self._status["currentVacuumPowerMode"])
 
     @property
     def default_power_mode(self) -> VacuumHeuristPowerMode:
         """Return default power mode."""
+        if self._status is None:
+            return VacuumHeuristPowerMode.QUIET
         return VacuumHeuristPowerMode(self._status["defaultVacuumPowerMode"])
 
     @property
     def current_cleaning_mode(self) -> CleaningMode:
         """Return current cleaning mode."""
+        if self._status is None:
+            return CleaningMode.GLOBAL
         return CleaningMode(self._status["currentCleaningMode"])
 
     @property
     def default_cleaning_mode(self) -> CleaningMode:
         """Return default cleaning mode."""
+        if self._status is None:
+            return CleaningMode.GLOBAL
         return CleaningMode(self._status["defaultCleaningMode"])
 
     @property
     def is_bin_full(self) -> bool:
         """Return if the bin is full."""
+        if self._status is None:
+            return False
         airways = self._status.get("faults", {}).get("AIRWAYS")
         if airways is None:
             return False

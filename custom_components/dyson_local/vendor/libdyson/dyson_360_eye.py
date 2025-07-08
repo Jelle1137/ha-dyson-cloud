@@ -15,6 +15,8 @@ class Dyson360Eye(DysonVacuumDevice):
     @property
     def power_mode(self) -> VacuumEyePowerMode:
         """Power mode of the device."""
+        if self._status is None:
+            return VacuumEyePowerMode.QUIET
         return VacuumEyePowerMode(self._status["currentVacuumPowerMode"])
 
     def start(self) -> None:

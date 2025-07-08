@@ -17,6 +17,8 @@ class DysonVacuumDevice(DysonDevice):
     @property
     def state(self) -> VacuumState:
         """State of the device."""
+        if self._status is None:
+            return VacuumState.INACTIVE_DISCHARGING
         return VacuumState(
             self._status["state"]
             if "state" in self._status
@@ -26,6 +28,8 @@ class DysonVacuumDevice(DysonDevice):
     @property
     def cleaning_type(self) -> Optional[CleaningType]:
         """Return the type of the current cleaning task."""
+        if self._status is None:
+            return None
         cleaning_type = self._status["fullCleanType"]
         if cleaning_type == "":
             return None
@@ -34,6 +38,8 @@ class DysonVacuumDevice(DysonDevice):
     @property
     def cleaning_id(self) -> Optional[str]:
         """Return the id of the current cleaning task."""
+        if self._status is None:
+            return None
         cleaning_id = self._status["cleanId"]
         if cleaning_id == "":
             return None
@@ -42,11 +48,15 @@ class DysonVacuumDevice(DysonDevice):
     @property
     def battery_level(self) -> int:
         """Battery level of the device in percentage."""
+        if self._status is None:
+            return 0
         return self._status["batteryChargeLevel"]
 
     @property
     def position(self) -> Optional[Tuple[int, int]]:
         """Position (x, y) of the device."""
+        if self._status is None:
+            return None
         if (
             "globalPosition" in self._status
             and len(self._status["globalPosition"]) == 2
