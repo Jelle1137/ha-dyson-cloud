@@ -2,6 +2,7 @@
 from abc import abstractmethod
 import json
 import logging
+import ssl
 import threading
 from typing import Any, Optional, List, Dict, Union
 
@@ -116,11 +117,14 @@ class DysonDevice:
 
     def connect_iot(self, endpoint: str, client_id: str, token_value: str, token_signature: str) -> None:
         """Connect to the device via IoT/cloud MQTT broker with custom authentication."""
+        _LOGGER.debug("Starting IoT connection to %s with client_id: %s", endpoint, client_id)
+        
         self._disconnected.clear()
         self._mqtt_client = mqtt.Client(protocol=mqtt.MQTTv31)
         
-        # Set up TLS for secure connection
-        self._mqtt_client.tls_set()
+        # Set up TLS for secure connection - create SSL context manually to avoid blocking calls
+        context = ssl.create_default_context()
+        self._mqtt_client.tls_set_context(context)
         
         # Set up custom authentication for IoT
         self._mqtt_client.username_pw_set(client_id, token_value)
@@ -131,15 +135,32 @@ class DysonDevice:
             self._mqtt_client.user_data_set({"x-amzn-iot-token": token_signature})
         
         error = None
+        connection_result = None
 
         def _on_connect(client: mqtt.Client, userdata: Any, flags, rc):
             _LOGGER.debug("IoT Connected with result code %d", rc)
-            nonlocal error
+            nonlocal error, connection_result
+            connection_result = rc
             if rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
+                _LOGGER.error("IoT connection refused: Bad username/password")
+                error = DysonInvalidCredential
+            elif rc == mqtt.CONNACK_REFUSED_IDENTIFIER_REJECTED:
+                _LOGGER.error("IoT connection refused: Client identifier rejected")
+                error = DysonConnectionRefused
+            elif rc == mqtt.CONNACK_REFUSED_SERVER_UNAVAILABLE:
+                _LOGGER.error("IoT connection refused: Server unavailable")
+                error = DysonConnectionRefused
+            elif rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
+                _LOGGER.error("IoT connection refused: Bad username or password")
+                error = DysonInvalidCredential
+            elif rc == mqtt.CONNACK_REFUSED_NOT_AUTHORIZED:
+                _LOGGER.error("IoT connection refused: Not authorized")
                 error = DysonInvalidCredential
             elif rc != mqtt.CONNACK_ACCEPTED:
+                _LOGGER.error("IoT connection refused with code: %d", rc)
                 error = DysonConnectionRefused
             else:
+                _LOGGER.debug("IoT connection successful, subscribing to topic: %s", self._status_topic)
                 client.subscribe(self._status_topic)
             self._connected.set()
 
@@ -153,11 +174,13 @@ class DysonDevice:
         self._mqtt_client.on_message = self._on_message
         
         # Connect to IoT endpoint on port 8883 (MQTT over TLS)
+        _LOGGER.debug("Attempting IoT connection to %s:8883", endpoint)
         self._mqtt_client.connect_async(endpoint, 8883)
         self._mqtt_client.loop_start()
         
         if self._connected.wait(timeout=TIMEOUT):
             if error is not None:
+                _LOGGER.error("IoT connection failed with error: %s, result code: %s", error, connection_result)
                 self.disconnect()
                 raise error
 
@@ -166,8 +189,11 @@ class DysonDevice:
                 self._mqtt_client.on_connect = self._on_connect
                 self._mqtt_client.on_disconnect = self._on_disconnect
                 return
+            else:
+                _LOGGER.error("Failed to get first data from IoT device")
 
         # Close connection if timeout or connected but failed to get data
+        _LOGGER.error("IoT connection timed out or failed to get data")
         self.disconnect()
 
         raise DysonConnectTimeout
