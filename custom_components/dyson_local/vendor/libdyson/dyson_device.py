@@ -167,28 +167,87 @@ class DysonDevice:
         # Set up TLS for secure connection
         try:
             context = ssl.create_default_context()
-            context.check_hostname = False  # AWS IoT might have specific hostname requirements
+            # AWS IoT specific TLS configuration
+            context.check_hostname = True  # Re-enable hostname checking for AWS IoT
+            context.verify_mode = ssl.CERT_REQUIRED  # Require server certificate validation
+            
+            # Set minimum TLS version (AWS IoT requires TLS 1.2+)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            
+            # Set ciphers to match AWS IoT requirements
+            context.set_ciphers('ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS')
+            
             self._mqtt_client.tls_set_context(context)
-            _LOGGER.debug("TLS context set successfully")
+            _LOGGER.debug("TLS context set successfully with AWS IoT configuration")
         except Exception as e:
             _LOGGER.error("Failed to set TLS context: %s", e)
-            raise DysonConnectionRefused(f"TLS setup failed: {e}")
+            _LOGGER.info("Trying fallback TLS configuration...")
+            try:
+                # Fallback to basic TLS
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                self._mqtt_client.tls_set_context(context)
+                _LOGGER.debug("Fallback TLS context set successfully")
+            except Exception as e2:
+                _LOGGER.error("Fallback TLS setup also failed: %s", e2)
+                raise DysonConnectionRefused(f"TLS setup failed: {e}, fallback failed: {e2}")
         
-        # Set up authentication
+        # Set up authentication - try different methods
         try:
+            # For AWS IoT Custom Authorizer, the authentication might need to be in a specific format
+            # Let's try different combinations based on common patterns
+            
+            # Method 1: Standard approach - client_id as username, token_value as password
+            _LOGGER.info("Setting up standard authentication (client_id as username)...")
             self._mqtt_client.username_pw_set(client_id, token_value)
-            _LOGGER.debug("Username/password set: username=%s", client_id)
+            _LOGGER.debug("Standard auth set: username=%s, password_len=%d", client_id, len(token_value))
+            
         except Exception as e:
-            _LOGGER.error("Failed to set username/password: %s", e)
+            _LOGGER.error("Failed to set authentication: %s", e)
             raise DysonConnectionRefused(f"Auth setup failed: {e}")
+        
+        # Store alternative auth function for retry
+        def try_alternative_auth():
+            _LOGGER.info("Trying alternative authentication methods...")
+            
+            # Method 2: token_signature as username, token_value as password
+            try:
+                _LOGGER.info("Trying token_signature as username...")
+                self._mqtt_client.username_pw_set(token_signature, token_value)
+                _LOGGER.debug("Alt auth 1 set: username=%s..., password_len=%d", token_signature[:10], len(token_value))
+                return True
+            except Exception as e:
+                _LOGGER.error("Alt auth 1 failed: %s", e)
+            
+            # Method 3: Some IoT systems use a combined format
+            try:
+                _LOGGER.info("Trying combined token format...")
+                combined_token = f"{token_value}:{token_signature}"
+                self._mqtt_client.username_pw_set(client_id, combined_token)
+                _LOGGER.debug("Alt auth 2 set: username=%s, combined_token_len=%d", client_id, len(combined_token))
+                return True
+            except Exception as e:
+                _LOGGER.error("Alt auth 2 failed: %s", e)
+            
+            # Method 4: Try empty username with token as password
+            try:
+                _LOGGER.info("Trying empty username with token as password...")
+                self._mqtt_client.username_pw_set("", token_value)
+                _LOGGER.debug("Alt auth 3 set: empty username, token_len=%d", len(token_value))
+                return True
+            except Exception as e:
+                _LOGGER.error("Alt auth 3 failed: %s", e)
+            
+            return False
         
         # Track connection state
         error = None
         connection_result = None
         connection_attempted = False
+        auth_retry_attempted = False
         
         def _on_connect(client: mqtt.Client, userdata: Any, flags, rc):
-            nonlocal error, connection_result
+            nonlocal error, connection_result, auth_retry_attempted
             connection_result = rc
             _LOGGER.info("IoT MQTT Connection callback triggered with result code: %d", rc)
             _LOGGER.info("Connection flags: %s", flags)
@@ -205,8 +264,24 @@ class DysonDevice:
             result_meaning = result_meanings.get(rc, f"Unknown result code: {rc}")
             _LOGGER.info("Connection result meaning: %s", result_meaning)
             
-            if rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
-                _LOGGER.error("IoT connection refused: Bad username/password")
+            # If authentication failed, try alternative method
+            if rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD and not auth_retry_attempted:
+                _LOGGER.warning("Authentication failed, trying alternative authentication...")
+                auth_retry_attempted = True
+                
+                # Disconnect and retry with alternative auth
+                try:
+                    client.disconnect()
+                    if try_alternative_auth():
+                        _LOGGER.info("Retrying connection with alternative authentication...")
+                        client.connect_async(endpoint, 8883, 60)
+                        return
+                except Exception as e:
+                    _LOGGER.error("Failed to retry with alternative auth: %s", e)
+                
+                error = DysonInvalidCredential
+            elif rc == mqtt.CONNACK_REFUSED_BAD_USERNAME_PASSWORD:
+                _LOGGER.error("IoT connection refused: Bad username/password (after retry)")
                 _LOGGER.error("Username used: %s", client_id)
                 _LOGGER.error("Password length: %d", len(token_value) if token_value else 0)
                 error = DysonInvalidCredential
@@ -261,6 +336,22 @@ class DysonDevice:
         
         # Connect to IoT endpoint
         _LOGGER.info("Attempting to connect to %s:8883", endpoint)
+        
+        # First, let's test if we can reach the endpoint
+        _LOGGER.info("Testing network connectivity to %s:8883...", endpoint)
+        try:
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            result = sock.connect_ex((endpoint, 8883))
+            sock.close()
+            if result == 0:
+                _LOGGER.info("Network connectivity test: SUCCESS - can reach %s:8883", endpoint)
+            else:
+                _LOGGER.warning("Network connectivity test: FAILED - cannot reach %s:8883 (error: %d)", endpoint, result)
+        except Exception as e:
+            _LOGGER.warning("Network connectivity test failed: %s", e)
+        
         try:
             self._mqtt_client.connect_async(endpoint, 8883, 60)  # Increased keepalive
             _LOGGER.debug("connect_async() called successfully")
@@ -354,8 +445,10 @@ class DysonDevice:
 
     def _handle_message(self, payload: dict) -> None:
         _LOGGER.debug("Handling message with payload: %s", payload)
-        if payload["msg"] in ["CURRENT-STATE", "STATE-CHANGE"]:
-            _LOGGER.info("Processing state message: %s", payload["msg"])
+        msg_type = payload.get("msg", "Unknown")
+        
+        if msg_type in ["CURRENT-STATE", "STATE-CHANGE"]:
+            _LOGGER.info("Processing state message: %s", msg_type)
             _LOGGER.debug("New state: %s", payload)
             self._update_status(payload)
             if not self._status_data_available.is_set():
@@ -364,8 +457,16 @@ class DysonDevice:
             _LOGGER.debug("Calling %d callbacks", len(self._callbacks))
             for callback in self._callbacks:
                 callback(MessageType.STATE)
+        elif msg_type == "ENVIRONMENTAL-CURRENT-SENSOR-DATA":
+            _LOGGER.info("Processing environmental sensor data message")
+            # This is environmental data, let's handle it if the device supports it
+            if hasattr(self, '_update_environmental_data'):
+                self._update_environmental_data(payload)
+            else:
+                _LOGGER.debug("Device does not support environmental data updates")
         else:
-            _LOGGER.warning("Unhandled message type: %s", payload.get("msg", "Unknown"))
+            _LOGGER.warning("Unhandled message type: %s", msg_type)
+            _LOGGER.debug("Full unhandled message payload: %s", payload)
 
     @abstractmethod
     def _update_status(self, payload: dict) -> None:
