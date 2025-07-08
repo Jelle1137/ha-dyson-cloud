@@ -385,6 +385,12 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         host: Optional[str] = None,
     ) -> None:
         """Try connect."""
+        # If we have IoT details from cloud discovery, we can be more lenient with local connection
+        has_iot_details = hasattr(self, '_device_info') and self._device_info and self._device_info.iot_details
+        
+        if has_iot_details:
+            _LOGGER.debug("Device has IoT details, will use as fallback if local connection fails")
+            
         device = get_device(serial, credential, device_type)
 
         # Find device using discovery
@@ -406,15 +412,24 @@ class DysonLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             discovery.stop_discovery()
             if not succeed:
                 _LOGGER.debug("Discovery timed out")
+                # If we have IoT details, don't raise exception - we can connect remotely
+                if has_iot_details:
+                    _LOGGER.debug("Discovery failed but IoT details available, will try remote connection later")
+                    return
                 raise CannotFind
 
         # Try connect to the device
         try:
             device.connect(host)
+            _LOGGER.debug("Successfully connected to device locally")
         except DysonInvalidCredential:
             raise InvalidAuth
         except DysonException as err:
             _LOGGER.debug(f"Failed to connect to device: {type(err).__name__}, {err}")
+            # If we have IoT details, don't raise exception - we can connect remotely
+            if has_iot_details:
+                _LOGGER.debug("Local connection failed but IoT details available, will try remote connection later")
+                return
             raise CannotConnect
 
 
